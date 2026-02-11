@@ -6,10 +6,10 @@ import time
 import pyupbit
 
 st.set_page_config(page_title="통합 투자 대시보드", layout="wide")
-st.title("🚀 내 모든 투자 현황 (디버깅 모드)")
+st.title("🚀 내 모든 투자 현황")
 
 # ==========================================
-# [설정] Secrets 로드 확인
+# [설정] Secrets 로드
 # ==========================================
 try:
     IS_MOCK = st.secrets["kis"]["IS_MOCK"]
@@ -21,17 +21,15 @@ try:
     
     UPBIT_ACCESS = st.secrets["upbit"]["ACCESS_KEY"]
     UPBIT_SECRET = st.secrets["upbit"]["SECRET_KEY"]
-    
-    st.success(f"✅ 설정 로드 성공! (모드: {'모의투자' if IS_MOCK else '실전투자'})")
-    
 except Exception as e:
-    st.error(f"⚠️ Secrets 로드 실패: {e}")
+    st.error(f"⚠️ 설정 로드 실패: {e}")
     st.stop()
 
 # ==========================================
-# [API 함수] 에러 메시지 출력 기능 추가
+# [핵심 수정] 토큰 캐싱 (30분간 저장)
 # ==========================================
-def get_access_token():
+@st.cache_data(ttl=1800)  # <-- 이 부분이 핵심! (1800초 = 30분 동안 재사용)
+def get_cached_token():
     headers = {"content-type": "application/json"}
     body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
     
@@ -40,13 +38,13 @@ def get_access_token():
         if res.status_code == 200:
             return res.json()["access_token"]
         else:
-            st.error(f"❌ 토큰 발급 실패 (Status: {res.status_code})")
-            st.code(res.text) # 에러 내용을 화면에 보여줌
             return None
-    except Exception as e:
-        st.error(f"❌ 토큰 요청 중 에러: {e}")
+    except:
         return None
 
+# ==========================================
+# [API 함수] 주식 (캐시된 토큰 사용)
+# ==========================================
 def get_stock_balance(token, market="KR"):
     if not token: return [], 0, 0
     
@@ -70,28 +68,19 @@ def get_stock_balance(token, market="KR"):
             }
             res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/trading/inquire-balance", headers=headers, params=params)
             
-            if res.status_code != 200:
-                st.error(f"❌ 국장 잔고 조회 실패 (Status: {res.status_code})")
-                st.code(res.text)
-                return [], 0, 0
-                
-            out1 = res.json().get('output1', [])
-            out2 = res.json().get('output2', [])
-            
-            # API 응답 결과 코드 확인
-            if res.json().get('rt_cd') != '0':
-                st.error(f"❌ API 오류 메시지: {res.json().get('msg1')}")
-            
-            for row in out1:
-                if int(row['hldg_qty']) > 0:
-                    data.append({
-                        "종목명": row['prdt_name'], "수량": int(row['hldg_qty']),
-                        "현재가": float(row['prpr']), "평단가": float(row['pchs_avg_pric']),
-                        "수익률(%)": float(row['evlu_pfls_rt']), "평가손익": int(row['evlu_pfls_amt'])
-                    })
-            if out2:
-                total_asset = float(out2[0]['tot_evlu_amt'])
-                total_profit = float(out2[0]['evlu_pfls_smtl_amt'])
+            if res.status_code == 200:
+                out1 = res.json().get('output1', [])
+                out2 = res.json().get('output2', [])
+                for row in out1:
+                    if int(row['hldg_qty']) > 0:
+                        data.append({
+                            "종목명": row['prdt_name'], "수량": int(row['hldg_qty']),
+                            "현재가": float(row['prpr']), "평단가": float(row['pchs_avg_pric']),
+                            "수익률(%)": float(row['evlu_pfls_rt']), "평가손익": int(row['evlu_pfls_amt'])
+                        })
+                if out2:
+                    total_asset = float(out2[0]['tot_evlu_amt'])
+                    total_profit = float(out2[0]['evlu_pfls_smtl_amt'])
 
         elif market == "US":
             exchanges = ["NAS", "NYS", "AMS"]
@@ -114,9 +103,7 @@ def get_stock_balance(token, market="KR"):
                                 "현재가($)": float(row['ovrs_now_pric1']), "평단가($)": float(row['ovrs_pchs_avg_pric']),
                                 "수익률(%)": roi, "평가손익($)": profit
                             })
-    except Exception as e:
-        st.error(f"❌ 데이터 처리 중 오류: {e}")
-        
+    except: pass
     return data, total_asset, total_profit
 
 # ==========================================
@@ -125,10 +112,12 @@ def get_stock_balance(token, market="KR"):
 def get_crypto_balance():
     try:
         upbit = pyupbit.Upbit(UPBIT_ACCESS, UPBIT_SECRET)
+        # 에러 체크를 위해 try-except 안에서 호출
         balances = upbit.get_balances()
-        if 'error' in balances:
-            st.error(f"❌ 업비트 오류: {balances['error']['message']}")
-            return [], 0, 0
+        
+        # IP 에러 체크
+        if isinstance(balances, dict) and 'error' in balances:
+            return [], 0, 0, balances['error']['message']
             
         data = []
         total_krw = 0.0
@@ -161,17 +150,22 @@ def get_crypto_balance():
                 "평단가": avg, "수익률(%)": roi, "평가손익": profit
             })
             
-        return data, total_asset, total_asset - (total_buy + total_krw)
+        return data, total_asset, total_asset - (total_buy + total_krw), None
     except Exception as e:
-        st.error(f"❌ 업비트 연결 실패: {e}")
-        return [], 0, 0
+        return [], 0, 0, str(e)
 
 # ==========================================
 # [Main UI]
 # ==========================================
-if st.button("🔄 새로고침"): st.rerun()
+if st.button("🔄 새로고침"):
+    st.cache_data.clear() # 강제 새로고침 시 캐시 삭제
+    st.rerun()
 
-token = get_access_token()
+token = get_cached_token() # 캐시된 토큰 사용
+
+if not token:
+    st.warning("⏳ 토큰 발급 대기 중... (잠시 후 새로고침하세요)")
+
 tab1, tab2, tab3 = st.tabs(["🇰🇷 국장", "🇺🇸 미장", "🪙 코인"])
 
 with tab1:
@@ -186,11 +180,8 @@ with tab2:
     if token:
         d, a, p = get_stock_balance(token, "US")
         if d: st.dataframe(pd.DataFrame(d).style.format({"현재가($)":"{:,.2f}","수익률(%)":"{:+.2f}","평가손익($)":"{:,.2f}"}).map(lambda x: f"color:{'red' if x>0 else 'blue'}", subset=['수익률(%)','평가손익($)']), use_container_width=True)
-        else: st.info("보유 종목 없음")
 
 with tab3:
-    d, a, p = get_crypto_balance()
-    c1, c2 = st.columns(2)
-    c1.metric("코인 자산", f"{a:,.0f}원")
-    c2.metric("손익", f"{p:,.0f}원", delta=f"{p:,.0f}")
-    if d: st.dataframe(pd.DataFrame(d).style.format({"현재가":"{:,.0f}","수익률(%)":"{:+.2f}","평가손익":"{:,.0f}"}).map(lambda x: f"color:{'red' if x>0 else 'blue'}", subset=['수익률(%)','평가손익']), use_container_width=True)
+    d, a, p, err = get_crypto_balance()
+    if err:
+        st.error(f"⚠️ 업비트 오류
