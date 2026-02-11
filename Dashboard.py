@@ -5,10 +5,12 @@ import pandas as pd
 import time
 import pyupbit
 
+st.set_page_config(page_title="통합 투자 대시보드", layout="wide")
+st.title("🚀 내 모든 투자 현황 (디버깅 모드)")
+
 # ==========================================
-# [설정] 보안을 위해 st.secrets에서 키를 가져옵니다
+# [설정] Secrets 로드 확인
 # ==========================================
-# .streamlit/secrets.toml 파일 또는 Streamlit Cloud Settings에 설정해야 함
 try:
     IS_MOCK = st.secrets["kis"]["IS_MOCK"]
     URL_BASE = "https://openapivts.koreainvestment.com:29443" if IS_MOCK else "https://openapi.koreainvestment.com:9443"
@@ -19,20 +21,35 @@ try:
     
     UPBIT_ACCESS = st.secrets["upbit"]["ACCESS_KEY"]
     UPBIT_SECRET = st.secrets["upbit"]["SECRET_KEY"]
+    
+    st.success(f"✅ 설정 로드 성공! (모드: {'모의투자' if IS_MOCK else '실전투자'})")
+    
 except Exception as e:
-    st.error("⚠️ API 키 설정이 확인되지 않았습니다. .streamlit/secrets.toml 파일을 확인하세요.")
+    st.error(f"⚠️ Secrets 로드 실패: {e}")
     st.stop()
 
 # ==========================================
-# [API 함수] 주식 (KR/US)
+# [API 함수] 에러 메시지 출력 기능 추가
 # ==========================================
 def get_access_token():
     headers = {"content-type": "application/json"}
     body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
-    res = requests.post(f"{URL_BASE}/oauth2/tokenP", headers=headers, data=json.dumps(body))
-    return res.json()["access_token"] if res.status_code == 200 else None
+    
+    try:
+        res = requests.post(f"{URL_BASE}/oauth2/tokenP", headers=headers, data=json.dumps(body))
+        if res.status_code == 200:
+            return res.json()["access_token"]
+        else:
+            st.error(f"❌ 토큰 발급 실패 (Status: {res.status_code})")
+            st.code(res.text) # 에러 내용을 화면에 보여줌
+            return None
+    except Exception as e:
+        st.error(f"❌ 토큰 요청 중 에러: {e}")
+        return None
 
 def get_stock_balance(token, market="KR"):
+    if not token: return [], 0, 0
+    
     headers = {
         "content-type": "application/json", "authorization": f"Bearer {token}",
         "appkey": APP_KEY, "appsecret": APP_SECRET,
@@ -44,15 +61,27 @@ def get_stock_balance(token, market="KR"):
     total_asset = 0.0
     total_profit = 0.0
 
-    if market == "KR":
-        params = {
-            "CANO": CANO, "ACNT_PRDT_CD": ACNT_PRDT_CD, "AFHR_FLPR_YN": "N", "OFL_YN": "",
-            "INQR_DVSN": "02", "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N",
-            "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
-        }
-        res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/trading/inquire-balance", headers=headers, params=params)
-        if res.status_code == 200:
-            out1, out2 = res.json().get('output1', []), res.json().get('output2', [])
+    try:
+        if market == "KR":
+            params = {
+                "CANO": CANO, "ACNT_PRDT_CD": ACNT_PRDT_CD, "AFHR_FLPR_YN": "N", "OFL_YN": "",
+                "INQR_DVSN": "02", "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N",
+                "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00", "CTX_AREA_FK100": "", "CTX_AREA_NK100": ""
+            }
+            res = requests.get(f"{URL_BASE}/uapi/domestic-stock/v1/trading/inquire-balance", headers=headers, params=params)
+            
+            if res.status_code != 200:
+                st.error(f"❌ 국장 잔고 조회 실패 (Status: {res.status_code})")
+                st.code(res.text)
+                return [], 0, 0
+                
+            out1 = res.json().get('output1', [])
+            out2 = res.json().get('output2', [])
+            
+            # API 응답 결과 코드 확인
+            if res.json().get('rt_cd') != '0':
+                st.error(f"❌ API 오류 메시지: {res.json().get('msg1')}")
+            
             for row in out1:
                 if int(row['hldg_qty']) > 0:
                     data.append({
@@ -64,27 +93,30 @@ def get_stock_balance(token, market="KR"):
                 total_asset = float(out2[0]['tot_evlu_amt'])
                 total_profit = float(out2[0]['evlu_pfls_smtl_amt'])
 
-    elif market == "US":
-        exchanges = ["NAS", "NYS", "AMS"]
-        for exch in exchanges:
-            params = {
-                "CANO": CANO, "ACNT_PRDT_CD": ACNT_PRDT_CD, "OVRS_EXCG_CD": exch,
-                "TR_CRCY_CD": "USD", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
-            }
-            res = requests.get(f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-balance", headers=headers, params=params)
-            if res.status_code == 200:
-                out1 = res.json().get('output1', [])
-                for row in out1:
-                    qty = float(row['ovrs_cblc_qty'])
-                    if qty > 0:
-                        profit = float(row['frcr_evlu_pfls_amt'])
-                        buy = float(row['frcr_pchs_amt1'])
-                        roi = (profit/buy*100) if buy > 0 else 0
-                        data.append({
-                            "종목명": row['ovrs_item_name'], "수량": qty,
-                            "현재가($)": float(row['ovrs_now_pric1']), "평단가($)": float(row['ovrs_pchs_avg_pric']),
-                            "수익률(%)": roi, "평가손익($)": profit
-                        })
+        elif market == "US":
+            exchanges = ["NAS", "NYS", "AMS"]
+            for exch in exchanges:
+                params = {
+                    "CANO": CANO, "ACNT_PRDT_CD": ACNT_PRDT_CD, "OVRS_EXCG_CD": exch,
+                    "TR_CRCY_CD": "USD", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""
+                }
+                res = requests.get(f"{URL_BASE}/uapi/overseas-stock/v1/trading/inquire-balance", headers=headers, params=params)
+                if res.status_code == 200:
+                    out1 = res.json().get('output1', [])
+                    for row in out1:
+                        qty = float(row['ovrs_cblc_qty'])
+                        if qty > 0:
+                            profit = float(row['frcr_evlu_pfls_amt'])
+                            buy = float(row['frcr_pchs_amt1'])
+                            roi = (profit/buy*100) if buy > 0 else 0
+                            data.append({
+                                "종목명": row['ovrs_item_name'], "수량": qty,
+                                "현재가($)": float(row['ovrs_now_pric1']), "평단가($)": float(row['ovrs_pchs_avg_pric']),
+                                "수익률(%)": roi, "평가손익($)": profit
+                            })
+    except Exception as e:
+        st.error(f"❌ 데이터 처리 중 오류: {e}")
+        
     return data, total_asset, total_profit
 
 # ==========================================
@@ -94,6 +126,10 @@ def get_crypto_balance():
     try:
         upbit = pyupbit.Upbit(UPBIT_ACCESS, UPBIT_SECRET)
         balances = upbit.get_balances()
+        if 'error' in balances:
+            st.error(f"❌ 업비트 오류: {balances['error']['message']}")
+            return [], 0, 0
+            
         data = []
         total_krw = 0.0
         tickers = []
@@ -126,14 +162,13 @@ def get_crypto_balance():
             })
             
         return data, total_asset, total_asset - (total_buy + total_krw)
-    except: return [], 0, 0
+    except Exception as e:
+        st.error(f"❌ 업비트 연결 실패: {e}")
+        return [], 0, 0
 
 # ==========================================
 # [Main UI]
 # ==========================================
-st.set_page_config(page_title="통합 투자 대시보드", layout="wide")
-st.title("🚀 내 모든 투자 현황")
-
 if st.button("🔄 새로고침"): st.rerun()
 
 token = get_access_token()
@@ -159,7 +194,3 @@ with tab3:
     c1.metric("코인 자산", f"{a:,.0f}원")
     c2.metric("손익", f"{p:,.0f}원", delta=f"{p:,.0f}")
     if d: st.dataframe(pd.DataFrame(d).style.format({"현재가":"{:,.0f}","수익률(%)":"{:+.2f}","평가손익":"{:,.0f}"}).map(lambda x: f"color:{'red' if x>0 else 'blue'}", subset=['수익률(%)','평가손익']), use_container_width=True)
-
-if st.sidebar.checkbox("자동갱신(30초)", value=True):
-    time.sleep(30)
-    st.rerun()
