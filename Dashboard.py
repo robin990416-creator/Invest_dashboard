@@ -184,4 +184,10 @@ with tab2:
 with tab3:
     d, a, p, err = get_crypto_balance()
     if err:
-        st.error(f"⚠️ 업비트 오류
+        st.error(f"⚠️ 업비트 오류: {err}")
+        st.info("💡 해결법: 업비트 Open API 설정에서 해당 키의 'IP 주소 제한'을 해제하거나, 새 키(자산조회용)를 발급받으세요.")
+    else:
+        c1, c2 = st.columns(2)
+        c1.metric("코인 자산", f"{a:,.0f}원")
+        c2.metric("손익", f"{p:,.0f}원", delta=f"{p:,.0f}")
+        if d: st.dataframe(pd.DataFrame(d).style.format({"현재가":"{:,.0f}","수익률(%)":"{:+.2f}","평가손익":"{:,.0f}"}).map(lambda x: f"color:{'red' if x>0 else 'blue'}", subset=['수익률(%)','평가손익']), use_container_width=True)
